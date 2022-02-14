@@ -1,0 +1,655 @@
+---
+title: 'EDS 232: Lab 3 - Reserve Planning'
+author: "Paloma Cartwright"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+librarian::shelf(
+  assertthat,
+  BiocManager,
+  cluster,
+  dplyr, 
+  DT,
+  factoextra,
+  ggvoronoi,
+  gridExtra,
+  here,
+  h2o, 
+  mapview,
+  palmerpenguins,
+  prioritizr,
+  prioritizrdata,
+  raster, 
+  remotes, 
+  rgeos, 
+  rgdal, 
+  scales, 
+  sf, 
+  sp, 
+  stringr,
+  tibble, 
+  tidyverse,
+  vegan,
+  vegan3d, 
+  scales, 
+  units
+)
+
+if (!require("lpsymphony")){
+  BiocManager::install("lpsymphony")
+  library(lpsymphony)
+}
+
+set.seed(42)
+
+latest_r_version <- "4.0.4"
+```
+
+
+# Introduction
+
+This lab was created by the developer of the R package [`prioritizr`](https://prioritizr.net/) Jeffrey O. Hanson. I made slight tweaks to streamline code and reduce text.
+
+## Overview 
+
+The aim of this workshop is to help you get started with using the prioritizr R package for systematic conservation planning. It is not designed to give you a comprehensive overview and you will not become an expert after completing this workshop. Instead, we want to help you understand the core principles of conservation planning and guide you through some of the common tasks involved with developing prioritizations. In other words, we want to give you the knowledge base and confidence needed to start applying systematic conservation planning to your own work.
+
+## Data Set-up
+
+```{r}
+dir_data <- here("data/prioritizr")
+pu_shp   <- file.path(dir_data, "pu.shp")
+pu_url   <- "https://github.com/prioritizr/massey-workshop/raw/main/data.zip"
+pu_zip   <- file.path(dir_data, basename(pu_url))
+vegetation_tif <- file.path(dir_data, "vegetation.tif")
+
+dir.create(dir_data, showWarnings = F, recursive = T)
+if (!file.exists(pu_shp)){
+  download.file(pu_url, pu_zip)
+  unzip(pu_zip, exdir = dir_data)
+  dir_unzip   <- file.path(dir_data, "data")
+  files_unzip <- list.files(dir_unzip, full.names = T)
+  file.rename(
+    files_unzip, 
+    files_unzip %>% str_replace("prioritizr/data", "prioritizr"))
+  unlink(c(pu_zip, dir_unzip), recursive = T)
+}
+```
+# Data 
+
+## 2.1 Data Import 
+
+```{r}
+# import planning unit data
+pu_data <- as(read_sf(pu_shp), "Spatial")
+
+# format columns in planning unit data
+pu_data$locked_in <- as.logical(pu_data$locked_in)
+pu_data$locked_out <- as.logical(pu_data$locked_out)
+
+# import vegetation data
+veg_data <- stack(vegetation_tif)
+
+```
+
+
+## 2.2 Planning Unit Data 
+
+The planning unit data contains spatial data describing the geometry for each planning unit and attribute data with information about each planning unit (e.g. cost values). Let's investigate the `pu_data` object. The attribute data contains `r ncol(pu_data)` columns with contain the following information:
+
+* `id`: unique identifiers for each planning unit
+* `cost`: acquisition cost values for each planning unit (millions of Australian dollars).
+* `status`: status information for each planning unit (only relevant with Marxan)
+* `locked_in`: logical values (i.e. `TRUE`/`FALSE`) indicating if planning units are covered by protected areas or not.
+* `locked_out`: logical values (i.e. `TRUE`/`FALSE`) indicating if planning units cannot be managed as a protected area because they contain are too degraded.
+
+```{r}
+# print a short summary of the data
+print(pu_data)
+
+# plot the planning unit data
+plot(pu_data)
+
+# plot an interactive map of the planning unit data
+mapview(pu_data)
+
+# print the structure of object
+str(pu_data, max.level = 2)
+
+# print the class of the object
+class(pu_data)
+
+# print the slots of the object
+slotNames(pu_data)
+
+# print the coordinate reference system
+print(pu_data@proj4string)
+
+# print number of planning units (geometries) in the data
+nrow(pu_data)
+
+# print the first six rows in the data
+head(pu_data@data)
+
+# print the first six values in the cost column of the attribute data
+head(pu_data$cost)
+
+# print the highest cost value
+max(pu_data$cost)
+
+# print the smallest cost value
+min(pu_data$cost)
+
+# print average cost value
+mean(pu_data$cost)
+
+# plot a map of the planning unit cost data
+spplot(pu_data, "cost")
+
+# plot an interactive map of the planning unit cost data
+mapview(pu_data, zcol = "cost")
+
+
+```
+
+### **Questions**
+
+1. How many planning units are in the planning unit data?
+There are `r nrow(pu_data)` planning units in the data. 
+
+2. What is the highest cost value? 
+The highest cost value is `r max(pu_data$cost)`. 
+
+3. Is there a spatial pattern in the planning unit cost values? 
+
+Based on the map, the eastern side of Tasmania has planning units with lower costs ranging from 0 - 15. The Western side of Tasmania has mid cost planning units and the north-central plots are the most expensive with planning unit cost values up to 50.
+
+## 2.3 Vegetation Data
+
+The vegetation data describe the spatial distribution of 32 vegetation classes in the study area. This data is in a raster format and so the data are organized using a grid comprising square grid cells that are each the same size. In our case, the raster data contains multiple layers (also called “bands”) and each layer has corresponds to a spatial grid with exactly the same area and has exactly the same dimensionality (i.e. number of rows, columns, and cells). In this dataset, there are 32 different regular spatial grids layered on top of each other – with each layer corresponding to a different vegetation class – and each of these layers contains a grid with 164 rows, 326 columns, and 53464 cells. Within each layer, each cell corresponds to a 0.967 by 1.02 km square. The values associated with each grid cell indicate the (one) presence or (zero) absence of a given vegetation class in the cell.
+
+```{r}
+# print a short summary of the data
+print(veg_data)
+
+# plot a map of the 20th vegetation class
+plot(veg_data[[20]])
+
+# plot an interactive map of the 20th vegetation class
+mapview(veg_data[[20]])
+
+# print number of rows in the data
+nrow(veg_data)
+
+# print number of columns in the data
+ncol(veg_data)
+
+# print number of cells in the data
+ncell(veg_data)
+
+# print number of layers in the data
+nlayers(veg_data)
+
+# print  resolution on the x-axis
+xres(veg_data)
+
+# print resolution on the y-axis
+yres(veg_data)
+
+# print spatial extent of the grid, i.e. coordinates for corners
+extent(veg_data)
+
+# print the coordinate reference system
+print(veg_data@crs)
+
+# print a summary of the first layer in the stack
+print(veg_data[[1]])
+
+# print the value in the 800th cell in the first layer of the stack
+print(veg_data[[1]][800])
+
+# calculate the sum of all the cell values in the first layer
+cellStats(veg_data[[1]], "sum")
+
+# calculate the maximum value of all the cell values in the first layer
+cellStats(veg_data[[1]], "max")
+
+# calculate the minimum value of all the cell values in the first layer
+cellStats(veg_data[[1]], "min")
+
+# calculate the mean value of all the cell values in the first layer
+cellStats(veg_data[[1]], "mean")
+
+```
+
+### **Questions**
+
+1. What part of the study area is the 13th vegetation class found in (hint: make a map)? For instance, is it in the south-eastern part of the study area?
+
+```{r}
+mapview(veg_data[[13]])
+```
+
+The majority of the 13th vegetation class is found in the north-eastern part of the study area. 
+
+2. What proportion of cells contain the 12th vegetation class?
+
+```{r}
+num_cells <- ncell(veg_data)
+twelve_cells <- cellStats(veg_data[[12]], "sum")
+
+twelve_proportion <- twelve_cells / num_cells
+twelve_percent <- round((twelve_proportion * 100), 2)
+
+```
+
+`r twelve_percent`% of cells contain the 12th vegetation class. 
+
+
+3. Which vegetation class is the most abundant (i.e. present in the greatest number of cells)?
+
+```{r}
+all_stats <- cellStats(veg_data, "sum", na.rm = TRUE)
+
+which.max(all_stats)
+```
+
+`r which.max(all_stats)` is the vegetation class is the most abundant. 
+
+# 3 Gap Analysis 
+
+This step is critical: we cannot develop plans to improve conservation of biodiversity if we don’t understand how well existing policies are currently conserving biodiversity! To achieve this, we can perform a “gap analysis.” A gap analysis involves calculating how well each of our biodiversity features (i.e. vegetation classes in this exercise) are represented (covered) by protected areas. Next, we compare current representation by protected areas of each feature (e.g. 5% of their spatial distribution covered by protected areas) to a target threshold (e.g. 20% of their spatial distribution covered by protected areas). This target threshold denotes the minimum amount (e.g. minimum proportion of spatial distribution) that we need of each feature to be represented in the protected area system. 
+
+## Feature Abundance 
+
+```{r}
+
+# create prioritizr problem with only the data 
+p0 <- problem(pu_data, veg_data, cost_colum = "cost")
+
+# print empty problem 
+# we can see that only the cost and feature data are defined
+print(p0)
+
+abundance_data <- feature_abundances(p0)
+
+print(abundance_data)
+# only the first 10 rows are printed because the abundance_data is a tible and not a data.frame 
+
+print(class(abundance_data))
+
+print(abundance_data, n = Inf)
+
+
+```
+
+The abundance_data object contains three columns. The feature column contains the name of each feature (derived from names(veg_data)), the absolute_abundance column contains the total amount of each feature in all the planning units, and the relative_abundance column contains the total amount of each feature in the planning units expressed as a proportion of the total amount in the underlying raster data. Since all the raster cells containing vegetation overlap with the planning units, all of the values in the relative_abundance column are equal to one (meaning 100%). So the relative_abundance per feature is a measure of the ‘percent presence’ of that feature across all planning units (100% or 1 in the case of all these vegetation layers, which is not interesting), whereas absolute_abundance measures the total amount of that feature when the value for all planning units is added up. 
+
+```{r}
+# add new column with feature abundances in km^2
+
+abundance_data$absolute_abundance_km2 <- 
+  (abundance_data$absolute_abundance * prod(res(veg_data))) %>% 
+  set_units(m^2) %>% 
+  set_units(km^2)
+
+print(abundance_data)
+
+mean(abundance_data$absolute_abundance_km2)
+
+hist(abundance_data$absolute_abundance_km2, main = "Feature abundances")
+
+max(abundance_data$absolute_abundance_km2)
+
+abundance_data$feature[which.max(abundance_data$absolute_abundance_km2)]
+
+sum(abundance_data$absolute_abundance_km2 > set_units(100, km^2))
+```
+
+### **Questions**
+
+1. What is the median abundance of the features?
+
+The median abundance of the features is `r median(abundance_data$absolute_abundance_km2)`. 
+
+2. What is the name of the feature with the smallest abundance?
+
+The name of the feature with the smallest abundance is `r abundance_data$feature[which.min(abundance_data$absolute_abundance_km2)]`
+
+3. How many features have a total abundance greater than 100 km^2?
+
+`r sum(abundance_data$absolute_abundance_km2 > set_units(100, km^2))` features have a total abundance greater than 100km^2. 
+
+
+## Feature Representation 
+
+After calculating the total amount of each feature in the planning units (i.e. the features’ abundances), we will now calculate the amount of each feature in the planning units that are covered by protected areas (i.e. feature representation by protected areas).
+
+
+```{r}
+# create column in planning unit data withbinary values
+# indicqting if a planning unit is covered by protected areas or not 
+pu_data$pa_status <- as.numeric(pu_data$locked_in)
+
+# calculate feature representation by protected areas 
+repr_data <- eval_feature_representation_summary(p0, pu_data[, "pa_status"])
+
+print(repr_data)
+
+```
+
+The feature column contains the name of each feature, the absolute_held column shows the total amount of each feature held in the solution (i.e. the planning units covered by protected areas), and the relative_held column shows the proportion of each feature held in the solution (i.e. the proportion of each feature’s spatial distribution held in protected areas). So the absolute_held is an amount up to but not exceeding the original absolute_abundance of that feature across all planning units (see above) based on those planning units in the solution, and the relative_held is like the percent of planning units in the solution that had this feature present. Since the absolute_held values correspond to the number of grid cells in the veg_data object with overlap with protected areas, let’s convert them to area units (i.e. km2) so we can report them.
+
+```{r}
+# add new column with the areas represented in km^2 
+repr_data$absolute_held_km2 <- 
+  (repr_data$absolute_held * prod(res(veg_data))) %>% 
+  set_units(m^2) %>% 
+  set_units(km^2)
+
+print(repr_data)
+
+sum(repr_data$relative_held < 0.1)
+
+plot(abundance_data$absolute_abundance ~ repr_data$relative_held)
+
+```
+
+### **Questions**
+
+1. What is the avergae proportion of the features held in protected areas? 
+The average proportion of features held in protected areas is `r repr_data$relative_held`. 24% 
+
+2. If we set a target of 10% coverage by protected areas, how many features fail to meet this target?
+
+`r sum(repr_data$relative_held < 0.1)` fail to meet this target. **Ask friends about this one.**
+
+3. If we set a target of 20% coverage by protected areas, how many fail? 
+
+`r sum(repr_data$relative_held < 0.2)` fail to meet this target. 
+
+4. Is there a relationship between the total abundance of a feature and how well it is represented by protected areas?
+
+There is no relationship between the total abundance and its representation in protected areas. 
+
+# Spatial Prioritizations 
+
+```{r}
+print(pu_data)
+
+# make prioritization problem 
+p1_rds <- file.path(dir_data, "p1.rds")
+if(!file.exists(p1_rds)){
+  p1 <- problem(pu_data, veg_data, cost_column = "cost") %>% 
+  add_min_set_objective() %>% 
+  add_relative_targets(0.05) %>% 
+  add_binary_decisions() %>% 
+  add_lpsymphony_solver()
+
+  saveRDS(p1, p1_rds)
+}
+
+p1 <- readRDS(p1_rds)
+
+print(p1)
+
+s1 <- solve(p1)
+
+print(s1)
+
+
+eval_n_summary(p1, s1[, "solution_1"])
+
+eval_cost_summary(p1, s1[, "solution_1"])
+
+eval_feature_representation_summary(p1, s1[, "solution_1"])
+
+spplot(s1, "solution_1", col.regions = c("gray", "darkgreen"), main = "s1", colorkey = F)
+
+```
+
+### **Questions**
+
+1. How many planing units were selected in the prioritization? What proportion of planning units were selected in the prioritization?
+
+There were 15 planning units selected which was `r 15/516`% of the total. 
+
+2. Is there a pattern in the spatial distribution of the priority areas?
+
+There is not pattern in the spatial distribution. 
+
+3. Can you verify that all of the targets were met in the prioritization?
+
+Yes you can verify this because all of the relative_held in solution 1 are above 5%
+
+## Adding complexity 
+
+```{r}
+# plot locked_in data
+# TRUE = blue, FALSE = grey
+spplot(pu_data, "locked_in", col.regions = c("grey", "darkblue"),
+       main = "locked_in", colorkey = FALSE)
+```
+
+```{r}
+# make prioritization problem
+p2_rds <- file.path(dir_data, "p2.rds")
+if (!file.exists(p2_rds)){
+  p2 <- problem(pu_data, veg_data, cost_column = "cost") %>%
+      add_min_set_objective() %>%
+      add_relative_targets(0.05) %>%
+      add_locked_in_constraints("locked_in") %>%
+      add_binary_decisions() %>%
+      add_lpsymphony_solver()
+  saveRDS(p2, p2_rds)
+}
+p2 <- readRDS(p2_rds)
+
+# print problem
+print(p2)
+
+# solve problem
+s2 <- solve(p2)
+
+# plot solution
+# selected = green, not selected = grey
+spplot(s2, "solution_1", col.regions = c("grey80", "darkgreen"), main = "s2",
+       colorkey = FALSE)
+```
+
+### 10% targets 
+
+```{r}
+# make prioritization problem
+p3_rds <- file.path(dir_data, "p3.rds")
+if (!file.exists(p3_rds)){
+  p3 <- problem(pu_data, veg_data, cost_column = "cost") %>%
+    add_min_set_objective() %>%
+    add_relative_targets(0.1) %>%
+    add_locked_in_constraints("locked_in") %>%
+    add_binary_decisions() %>%
+    add_lpsymphony_solver()
+  saveRDS(p3, p3_rds)
+}
+p3 <- readRDS(p3_rds)
+
+# print problem
+print(p3)
+
+# solve problem
+s3 <- solve(p3)
+
+# plot solution
+# selected = green, not selected = grey
+spplot(s3, "solution_1", col.regions = c("grey80", "darkgreen"), main = "s3",
+       colorkey = FALSE)
+```
+
+### Lock out degraded areas 
+
+```{r}
+# plot locked_out data
+# TRUE = red, FALSE = grey
+spplot(pu_data, "locked_out", col.regions = c("grey80", "darkred"),
+       main = "locked_out", colorkey = FALSE)
+
+# make prioritization problem
+p4_rds <- file.path(dir_data, "p4.rds")
+if (!file.exists(p4_rds)){
+  p4 <- problem(pu_data, veg_data, cost_column = "cost") %>%
+    add_min_set_objective() %>%
+    add_relative_targets(0.1) %>%
+    add_locked_in_constraints("locked_in") %>%
+    add_locked_out_constraints("locked_out") %>%
+    add_binary_decisions() %>%
+    add_lpsymphony_solver()
+  saveRDS(p4, p4_rds)
+}
+p4 <- readRDS(p4_rds)
+# print problem
+print(p4)
+
+# solve problem
+s4 <- solve(p4)
+
+# plot solution
+# selected = green, not selected = grey
+spplot(s4, "solution_1", col.regions = c("grey80", "darkgreen"), main = "s4",
+       colorkey = FALSE)
+
+```
+
+### **Questions**
+
+1. What is the cost of the planning units selected in s2, s3, and s4? 2. How many planning units are in s2, s3, and s4?
+
+s2 costs 6600.1 and has `r eval_n_summary(p2, s2[, "solution_1"])` planning units, s3 costs 6669.9 and has `r eval_n_summary(p3, s3[, "solution_1"])` planning units, and s4 costs 6711.6 and has `r eval_n_summary(p4, s4[, "solution_1"])`planning units. 
+
+3. Do the solutions with more planning units have a greater cost? Why (or why not)?
+
+The solutions with more planning units have higher costs because there are more planning units. 
+
+4. Why does the first solution (s1) cost less than the second solution with protected areas locked into the solution (s2)?
+
+The first solution costs less than the second solution because the first solution holds the top 15 planning units but they are most likely more expensive. The second solution has more constraints to it is likely more expensive. 
+
+5. Why does the third solution (s3) cost less than the fourth solution solution with highly degraded areas locked out (s4)?
+
+The degraded areas cost less to protect so solution 4 is more expensive with the degraded areas locked out. 
+
+### Penalizing Fragmentation
+
+```{r}
+# make prioritization problem
+p5_rds <- file.path(dir_data, "p5.rds")
+if (!file.exists(p5_rds)){
+  p5 <- problem(pu_data, veg_data, cost_column = "cost") %>%
+    add_min_set_objective() %>%
+    add_boundary_penalties(penalty = 0.001) %>%
+    add_relative_targets(0.1) %>%
+    add_locked_in_constraints("locked_in") %>%
+    add_locked_out_constraints("locked_out") %>%
+    add_binary_decisions() %>%
+    add_lpsymphony_solver()
+  saveRDS(p5, p5_rds)
+}
+p5 <- readRDS(p5_rds)
+
+# print problem
+print(p5)
+
+# solve problem,
+# note this will take a bit longer than the previous runs
+s5 <- solve(p5)
+
+# print solution
+print(s5)
+
+# plot solution
+# selected = green, not selected = grey
+spplot(s5, "solution_1", col.regions = c("grey80", "darkgreen"), main = "s5",
+       colorkey = FALSE)
+```
+
+
+### **Questions**
+
+1. What is the cost the fourth (s4) and fifth (s5) solutions? Why does the fifth solution (s5) cost more than the fourth (s4) solution?
+
+The fifth solution costs more than the forth solution because they are clumped together and this clump is in an expensive part of the map so it costs more to protect all of these areas than the cheaper more spread out ones. 
+
+
+2. Try setting the penalty value to 0.000000001 (i.e. 1e-9) instead of 0.001. What is the cost of the solution now? Is it different from the fourth solution (s4) (hint: try plotting the solutions to visualize them)? Is this is a useful penalty value? Why (or why not)?
+
+```{r}
+# make prioritization problem
+p6_rds <- file.path(dir_data, "p6.rds")
+if (!file.exists(p6_rds)){
+  p6 <- problem(pu_data, veg_data, cost_column = "cost") %>%
+    add_min_set_objective() %>%
+    add_boundary_penalties(penalty = 0.000000001) %>%
+    add_relative_targets(0.1) %>%
+    add_locked_in_constraints("locked_in") %>%
+    add_locked_out_constraints("locked_out") %>%
+    add_binary_decisions() %>%
+    add_lpsymphony_solver()
+  saveRDS(p6, p6_rds)
+}
+p6 <- readRDS(p6_rds)
+# print problem
+print(p6)
+# solve problem,
+# note this will take a bit longer than the previous runs
+s6 <- solve(p6)
+# print solution
+print(s6)
+# plot solution
+# selected = green, not selected = grey
+spplot(s6, "solution_1", col.regions = c("grey80", "darkgreen"), main = "s6",
+       colorkey = FALSE)
+
+```
+
+If you set the penalty too low nothing changes and there is no change in the cost of the planning units. 
+
+3. Try setting the penalty value to 0.5. What is the cost of the solution now? Is it different from the fourth solution (s4) (hint: try plotting the solutions to visualize them)? Is this a useful penalty value? Why (or why not)?
+
+```{r}
+# make prioritization problem
+p7_rds <- file.path(dir_data, "p7.rds")
+if (!file.exists(p7_rds)){
+  p7 <- problem(pu_data, veg_data, cost_column = "cost") %>%
+    add_min_set_objective() %>%
+    add_boundary_penalties(penalty = 0.5) %>%
+    add_relative_targets(0.1) %>%
+    add_locked_in_constraints("locked_in") %>%
+    add_locked_out_constraints("locked_out") %>%
+    add_binary_decisions() %>%
+    add_lpsymphony_solver()
+  saveRDS(p7, p7_rds)
+}
+p7 <- readRDS(p7_rds)
+# print problem
+print(p7)
+# solve problem,
+# note this will take a bit longer than the previous runs
+s7 <- solve(p7)
+# print solution
+print(s7)
+# plot solution
+# selected = green, not selected = grey
+spplot(s7, "solution_1", col.regions = c("grey80", "darkgreen"), main = "s7",
+       colorkey = FALSE)
+
+```
+
+The solution cost with a penalty value of 0.5 is $420196.69. This is very different from solution 4 with significantly higher costs. This is not a useful penalty value because you get one giant grouping you get one giant clump but this extreme is not useful because the cost is crazy high. 
+
