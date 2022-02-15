@@ -245,6 +245,7 @@ The majority of the 13th vegetation class is found in the north-eastern part of 
 ```{r}
 num_cells <- ncell(veg_data)
 twelve_cells <- cellStats(veg_data[[12]], "sum")
+twelve_cells
 
 twelve_proportion <- twelve_cells / num_cells
 twelve_percent <- round((twelve_proportion * 100), 2)
@@ -252,7 +253,6 @@ twelve_percent <- round((twelve_proportion * 100), 2)
 ```
 
 `r twelve_percent`% of cells contain the 12th vegetation class. 
-
 
 3. Which vegetation class is the most abundant (i.e. present in the greatest number of cells)?
 
@@ -262,7 +262,7 @@ all_stats <- cellStats(veg_data, "sum", na.rm = TRUE)
 which.max(all_stats)
 ```
 
-`r which.max(all_stats)` is the vegetation class is the most abundant. 
+`r which.max(all_stats)` is the vegetation class that is the most abundant. 
 
 # 3 Gap Analysis 
 
@@ -370,7 +370,7 @@ The average proportion of features held in protected areas is `r repr_data$relat
 
 2. If we set a target of 10% coverage by protected areas, how many features fail to meet this target?
 
-`r sum(repr_data$relative_held < 0.1)` fail to meet this target. **Ask friends about this one.**
+`r sum(repr_data$relative_held < 0.1)` fail to meet this target. 
 
 3. If we set a target of 20% coverage by protected areas, how many fail? 
 
@@ -420,7 +420,7 @@ spplot(s1, "solution_1", col.regions = c("gray", "darkgreen"), main = "s1", colo
 
 1. How many planing units were selected in the prioritization? What proportion of planning units were selected in the prioritization?
 
-There were 15 planning units selected which was `r 15/516`% of the total. 
+There were 15 planning units selected which was `r ((15/516) * 100)`% of the total. 
 
 2. Is there a pattern in the spatial distribution of the priority areas?
 
